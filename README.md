@@ -7,13 +7,13 @@ developments. Some parts of this library are based on [this other one][nninit] w
 
 # Supported Initialization Schemes
 
-- A generalization of the initialization schemes from [1], [2], and [3].
+- A generalization of the variance-normalizing initialization schemes from [1], [2], and [3].
 - The orthogonal initialization scheme, described in [4].
 - Input preserving initialization schemes that are useful for pixel-labeling architectures:
    - Identity initialization for convolutional layers, described in [6].
    - Downsampling initialization for strided convolutional layers.
-   - Bilinear upsamping initialization for transpose convolutional layers (aka
-   `SpatialFullConvolution` in Torch -- a horrible name), described in [5].
+   - Bilinear upsamping initialization for transpose convolutional layers (known as
+     `SpatialFullConvolution` in Torch -- a horrible name), described in [5].
 
 [1]: http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
 "Efficient BackProp"
