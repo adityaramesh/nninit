@@ -4,10 +4,10 @@ local nninit = require('nninit')
 
 local img = image.lena()
 local img_width = img:size(2)
-image.save('original.png', img)
+image.save('output/original.png', img)
 
 for _, scale in pairs({1, 2, 3, 10, 11}) do
-	local m = nninit.make_downsampling_spatial_conv({kernel_width = scale,
+	local m = nninit.make_sptial_downsampling_conv({kernel_width = scale,
 		n_maps_in = 3, expansion_factor = 1, scale = scale, input_width = img_width})
 
 	local new_width = math.ceil(img_width / scale)
@@ -26,7 +26,7 @@ for _, scale in pairs({1, 2, 3, 10, 11}) do
 end
 
 for _, scale in pairs({1, 2, 3, 10, 11}) do
-	local m = nninit.make_downsampling_spatial_conv({kernel_width = 2 * scale,
+	local m = nninit.make_sptial_downsampling_conv({kernel_width = 2 * scale,
 		n_maps_in = 3, expansion_factor = 1, scale = scale, input_width = img_width})
 
 	local new_width = math.ceil(img_width / scale)
@@ -45,7 +45,7 @@ for _, scale in pairs({1, 2, 3, 10, 11}) do
 end
 
 for _, scale in pairs({1, 2, 3, 10, 11}) do
-	local m = nninit.make_downsampling_spatial_conv({kernel_width = 2 * scale + 1,
+	local m = nninit.make_sptial_downsampling_conv({kernel_width = 2 * scale + 1,
 		n_maps_in = 3, expansion_factor = 1, scale = scale, input_width = img_width})
 
 	local new_width = math.ceil(img_width / scale)

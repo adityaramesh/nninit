@@ -236,7 +236,7 @@ original image less and retains more sharpness in the examples that I tested.
 TODO: Support for non-square inputs.
 TODO: Support for perforated convolutions?
 --]]
-function nninit.make_downsampling_spatial_conv(args)
+function nninit.make_spatial_downsampling_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
 	local fm_out       = k * fm_in
 	local scale        = args.scale
@@ -348,11 +348,11 @@ function nninit.make_spatial_upsampling_conv(args)
 	local pw, aw, m
 
 	if scale % 2 == 0 then
-		pw = scale + scale / 2 + extra_width
-		aw = 1 + extra_width
+		pw = scale + scale / 2
+		aw = 1
 	else
-		pw = scale + (scale - 1) / 2 + extra_width
-		aw = extra_width
+		pw = scale + (scale - 1) / 2
+		aw = 0
 	end
 
 	m = nn.SpatialFullConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw, aw, aw)
@@ -362,7 +362,7 @@ function nninit.make_spatial_upsampling_conv(args)
 	b:zero()
 
 	local v = torch.Tensor(inner_width)
-	for i = 1, kw do v[i] = 1 - math.abs(i - scale) / scale end
+	for i = 1, inner_width do v[i] = 1 - math.abs(i - scale) / scale end
 	local init = torch.ger(v, v)
 
 	for i = 1, fm_in do
@@ -373,7 +373,14 @@ function nninit.make_spatial_upsampling_conv(args)
 		end
 	end
 
-	return nn.Sequential():add(nn.SpatialReplicationPadding(1, 1, 1, 1)):add(m)
+	if extra_width == 0 then
+		return nn.Sequential():add(nn.SpatialReplicationPadding(1, 1, 1, 1)):add(m)
+	else
+		return nn.Sequential():
+			add(nn.SpatialReplicationPadding(1, 1, 1, 1)):
+			add(m):
+			add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
+	end
 end
 
 -- TODO how to get this method to reduce to LSUV?
