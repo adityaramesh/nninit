@@ -10,3 +10,6 @@ __pycache__
 *.swo
 *.swn
 *.vim
+
+# Project-related files.
+output

@@ -49,7 +49,7 @@ nn.Module.init = function(self, initializer, ...)
 	return self
 end
 
-nninit = {}
+local nninit = {}
 
 --[[
 Let $f$ be a given activation function, and $x$ be a random variable with zero mean and unit
@@ -174,8 +174,8 @@ TODO: Support for perforated convolutions?
 --]]
 function nninit.make_identity_spatial_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
-	local fm_out = k * fm_in
-	local dw = 1
+	local fm_out       = k * fm_in
+	local dw           = 1
 
 	--[[
 	The padding is chosen such that the application of the kernel to the top-left corner of the
@@ -188,7 +188,7 @@ function nninit.make_identity_spatial_conv(args)
 	if kw % 2 == 0 then
 		local pw = 0
 		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
-		local w, b = m.weight
+		local w, b = m.weight, m.bias
 
 		w:zero()
 		b:zero()
@@ -202,11 +202,14 @@ function nninit.make_identity_spatial_conv(args)
 
 		local p_lt = kw / 2 - 1
 		local p_rb = kw / 2
-		return nn.Sequential():add(nn.SpatialZeroPadding(p_lt, p_rb, p_lt, p_rb)):add(m)
+
+		return nn.Sequential():
+			add(nn.SpatialZeroPadding(p_lt, p_rb, p_lt, p_rb)):
+			add(m)
 	else
 		local pw = (kw - 1) / 2
 		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
-		local w, b = m.weight
+		local w, b = m.weight, m.bias
 
 		w:zero()
 		b:zero()
@@ -226,22 +229,39 @@ end
 Returns a strided `nn.SpatialConvolution` layer initialized such that each group of $k$ consecutive
 output feature maps downsamples the same input feature map.
 
+Note: this doesn't match the result of upsampling using `image.scale`, but (1) I don't have time to
+examine the source to see what it's doing, and (2) the output from this function seems to "move" the
+original image less and retains more sharpness in the examples that I tested.
+
 TODO: Support for non-square inputs.
 TODO: Support for perforated convolutions?
 --]]
 function nninit.make_downsampling_spatial_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
-	local fm_out = k * fm_in
-	local scale = args.scale
+	local fm_out       = k * fm_in
+	local scale        = args.scale
+	local iw           = args.input_width
 
 	assert(scale >= 1)
 	assert(kw >= scale)
+	assert(iw >= kw)
+
+	local extend_width = 0
+	if iw % scale ~= 0 then extend_width = scale - iw % scale end
 	local extra_width = kw - scale
+
+	local p_lt, p_rb
+
+	if extend_width % 2 == 0 then
+		p_lt, p_rb = extend_width / 2, extend_width / 2
+	else
+		p_lt, p_rb = (extend_width - 1) / 2, (extend_width + 1) / 2
+	end
 
 	if extra_width % 2 == 0 then
 		local pw = extra_width / 2
 		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
-		local w, b = m.weight, m.bias()
+		local w, b = m.weight, m.bias
 
 		w:zero()
 		b:zero()
@@ -249,11 +269,18 @@ function nninit.make_downsampling_spatial_conv(args)
 		for i = 1, fm_in do
 			for j = 1, k do
 				local i_out = k * (i - 1) + j
-				w[{{i_out}, {i}, {pw + 1, pw + kw}, {pw + 1, pw + kw}}]:fill(1 / kw^2)
+				w[{{i_out}, {i}, {pw + 1, pw + scale},
+					{pw + 1, pw + scale}}]:fill(1 / scale^2)
 			end
 		end
 
-		return m
+		if extend_width == 0 then
+			return m
+		else
+			return nn.Sequential():
+				add(nn.SpatialReflectionPadding(p_lt, p_rb, p_lt, p_rb)):
+				add(m)
+		end
 	else
 		local pw = 0
 		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
@@ -262,17 +289,27 @@ function nninit.make_downsampling_spatial_conv(args)
 		w:zero()
 		b:zero()
 
-		local p_lt = (extra_width - 1) / 2
-		local p_rb = (extra_width + 1) / 2
+		local zp_lt = (extra_width - 1) / 2
+		local zp_rb = (extra_width + 1) / 2
 
 		for i = 1, fm_in do
 			for j = 1, k do
 				local i_out = k * (i - 1) + j
-				w[{{i_out}, {i}, {p_lt + 1, p_lt + kw}, {p_rb + 1, p_rb + kw}}]:fill(1 / kw^2)
+				w[{{i_out}, {i}, {zp_lt + 1, zp_lt + scale},
+					{zp_lt + 1, zp_lt + scale}}]:fill(1 / scale^2)
 			end
 		end
 
-		return nn.Sequential():add(nn.SpatialZeroPadding(p_lt, p_rb, p_lt, p_rb)):add(m)
+		if extend_width == 0 then
+			return nn.Sequential():
+				add(nn.SpatialZeroPadding(zp_lt, zp_rb, zp_lt, zp_rb)):
+				add(m)
+		else
+			return nn.Sequential():
+				add(nn.SpatialReflectionPadding(p_lt, p_rb, p_lt, p_rb)):
+				add(nn.SpatialZeroPadding(zp_lt, zp_rb, zp_lt, zp_rb)):
+				add(m)
+		end
 	end
 end
 
@@ -284,8 +321,8 @@ TODO: Support for non-square inputs.
 --]]
 function nninit.make_spatial_upsampling_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
-	local fm_out = k * fm_in
-	local scale = args.scale
+	local fm_out       = k * fm_in
+	local scale        = args.scale
 
 	assert(scale >= 1)
 	local inner_width = 2 * scale - 1
@@ -297,7 +334,7 @@ function nninit.make_spatial_upsampling_conv(args)
 	  - `extra_width`: If `kw > inner_width`, then in order to produce the same output as the
 	    case where `kw == inner_width`, we initialize the bottom-left `inner_width x
 	    inner_width` block of the kernel to perform bilinear upsampling, and set the remaining
-	    top-left and top-right border to zero.
+	    border along the top and right of the image to zero.
 	  - `aw`: Note that the width of the "pure" part of the output image that is not affected by
 	    the `SpatialReplicationPadding` is given by `o_w = scale * (i_w - 1) + 1`. The desired
 	    width of the output image is `scale * i_w`, so we must extend the width of the image by
