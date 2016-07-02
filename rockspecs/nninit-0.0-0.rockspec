@@ -24,5 +24,5 @@ dependencies = {
 
 build = {
 	type = 'builtin',
-	modules = {['nninit'] = 'source/nninit.lua'}
+	modules = {['nninit.init'] = 'source/nninit.lua'}
 }

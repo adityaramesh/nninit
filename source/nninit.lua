@@ -49,6 +49,8 @@ nn.Module.init = function(self, initializer, ...)
 	return self
 end
 
+nninit = {}
+
 --[[
 Let $f$ be a given activation function, and $x$ be a random variable with zero mean and unit
 variance. For simplicity, assume that $x$ is never in the saturating domain of $f$. This function
