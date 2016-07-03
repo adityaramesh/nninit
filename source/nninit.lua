@@ -138,7 +138,7 @@ function nninit.orthogonal(module, gain)
 	local u, _, v = torch.svd(seed, 'S')
 
 	local q
-	if q:size(2) == cols then q = u
+	if u:size(2) == cols then q = u
 	else q = v end
 
 	assert(q:size(1) == rows)
