@@ -129,8 +129,6 @@ vector, and ensure that all of these vectors are orthonormal.
 [2]: https://plus.google.com/+SoumithChintala/posts/RZfdrRQWL6u
 --]]
 function nninit.orthogonal(module, gain)
-	assert(target:nDimension() >= 2)
-
 	local w = module.weight
 	local rows = w:size(1)
 	local cols = w:size(2)
