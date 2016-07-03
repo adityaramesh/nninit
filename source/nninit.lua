@@ -139,7 +139,7 @@ function nninit.orthogonal(module, gain)
 
 	local q
 	if u:size(2) == cols then q = u
-	else q = v end
+	else q = v:t() end
 
 	assert(q:size(1) == rows)
 	assert(q:size(2) == cols)
