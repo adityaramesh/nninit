@@ -92,7 +92,7 @@ Important notes:
 [3]: https://arxiv.org/abs/1502.01852
 "Delving Deep Into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification"
 --]]
-function nninit.preserve_variance(module, gain, variant, dist)
+function nninit.normalize_variance(module, gain, variant, dist)
 	variant = variant or 1
 	dist = dist or 'normal'
 	local fan_in, fan_out = compute_fan(module)
