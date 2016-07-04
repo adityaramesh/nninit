@@ -421,6 +421,13 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 	local module_info = {}
 
 	for i, module in pairs(model.modules) do
+		local is_learnable = m.weight ~= nil or m.bias ~= nil
+
+		if is_learnable and i == #model.modules then
+			error("The last module in the network cannot be learnable, since there is " ..
+				"no way to obtain the gradient of the loss with respect to its outputs.")
+		end
+
 		-- Determine whether we know how to deal with this module type.
 		local status, fan_in, _ = pcall(function() return compute_fan(module) end)
 
@@ -444,7 +451,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			}
 
 			table.insert(module_info, info)
-		elseif m.weight ~= nil or m.bias ~= nil then
+		elseif is_learnable then
 			local typename = torch.typename(module)
 			print(F"Warning: module {j} of type {typename} has learnable parameters "   ..
 				"but is unsupported. It will be ignored during the initialization " ..
@@ -498,7 +505,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			local sum_input_norm = target:norm(2, 2):sum()
 
 			local module = model.modules[info.index]
-			local w, g   = module.weight, module.gradOutput
+			local w, g   = module.weight, model.modules[info.index + 1].gradInput
 
 			assert(g:size(1) == batch_size)
 			local g_ = g:view(batch_size, g[{{1}}]:nElement())
