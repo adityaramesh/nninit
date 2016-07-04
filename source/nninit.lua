@@ -7,7 +7,7 @@ local nn = require('nn')
 
 --[[
 Returns the fan-in and the fan-out of the given module. The fan-in is the number of inputs used to
-compute one activation; the fan-out is the number of activations used to compute one output.
+compute one activation; the fan-out is the number of activations computed using one output.
 --]]
 local function compute_fan(module)
 	local typename = torch.typename(module)
@@ -374,6 +374,7 @@ function nninit.make_spatial_upsampling_conv(args)
 	if extra_width == 0 then
 		return nn.Sequential():add(nn.SpatialReplicationPadding(1, 1, 1, 1)):add(m)
 	else
+		-- XXX: cropping using `SpatialZeroPadding` is very slow.
 		return nn.Sequential():
 			add(nn.SpatialReplicationPadding(1, 1, 1, 1)):
 			add(m):
@@ -381,9 +382,170 @@ function nninit.make_spatial_upsampling_conv(args)
 	end
 end
 
--- TODO how to get this method to reduce to LSUV?
-function nninit.data_driven(module, update_func, dampening)
-	dampening = dampening or 0.25
+--[[
+Implements the data-driven LSUV initialization method described in [1]. Note that the weights of the
+network should have already been initialized using a static initialization method. All biases should
+be initialized to zero.
+
+[1]: http://arxiv.org/abs/1511.06422
+"All you need is a good init"
+--]]
+function nninit.lsuv(module, eval_func, args)
+
+end
+
+--[[
+Implements the data-driven initialization method described in [1]. Note that the weights of the
+network should have already been initialized using a static initialization method. All biases should
+be initialized to zero.
+
+[1]: http://arxiv.org/pdf/1511.06856.pdf
+"Data-dependent initialization of convolutional neural networks"
+
+- TODO: extension to non-feedforward architectures? Technically, the method described in [1] only
+  applies to feedforward archiectures, but in practice, many models are not purely feedforward.
+--]]
+function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
+	args = args or {}
+	local beta       = args.beta       or 0
+	local dampening  = args.dampening  or 0.25
+	local batch_size = args.batch_size or 128
+	local max_iters  = args.max_iters  or 20   -- TODO: find a reasonable value instead of guessing.
+	local tol        = args.tol        or 1e-5 -- TODO: find a reasonable value instead of guessing.
+
+	assert(dampening > 0 and dampening < 1)
+	assert(batch_size > 0)
+	assert(max_iters > 0)
+	assert(tol > 0 and tol < 1)
+
+	local module_info = {}
+
+	for i, module in pairs(model.modules) do
+		-- Determine whether we know how to deal with this module type.
+		local status, fan_in, _ = pcall(function() return compute_fan(module) end)
+
+		if status then
+			local w, b = module.weight, module.bias
+			local output_count = w:size(1)
+			assert(w:nElement() == fan_in * output_count)
+
+			if b ~= nil then
+				assert(b:nDimension() == 1)
+				assert(b:size(1) == output_count)
+				assert(torch.all(torch.eq(bias, 0)))
+			end
+
+			local info = {
+				index        = i,
+				fan_in       = fan_in,
+				output_count = output_count,
+				out_means    = w.new(output_count),
+				out_stds     = w.new(output_count),
+			}
+
+			table.insert(module_info, info)
+		elseif m.weight ~= nil or m.bias ~= nil then
+			local typename = torch.typename(module)
+			print(F"Warning: module {j} of type {typename} has learnable parameters "   ..
+				"but is unsupported. It will be ignored during the initialization " ..
+				"procedure. Please submit a feature request on Github.")
+		end
+	end
+
+	-- "Within-layer initialization"
+	for i, info in pairs(module_info) do
+		fwd_eval_func(batch_size)
+
+		local module    = model.modules[info.index]
+		local w, b, out = module.weight, module.bias, module.output
+
+		assert(out:nDimension() >= 2)
+		assert(out:size(1) == batch_size)
+		local out_ = out:view(out:size(1), out[{{1}}]:nElement())
+
+		local mu, sigma = info.out_means, info.out_stds
+		mu:mean(out_, 2)
+		sigma:std(out_, 2)
+
+		local w_  = w:view(info.output_count, info.fan_in)
+		local mu_ = torch.expand(mu:view(info.output_count, 1), info.output_count, info.fan_in)
+		w_:cdiv(mu_)
+
+		if b ~= nil then b:fill(beta):addcdiv(b, -1, mu, sigma) end
+	end
+
+	local rates = torch.Tensor(#module_info)
+	local ratios = torch.Tensor(#module_info)
+	local avg_rate, converged_layers = 0, 0
+
+	-- "Between-layer initialization"
+	(function() for i = 1, max_iters do
+		local batch = fwd_bwd_eval_func(batch_size)
+		assert(batch:size(1) == batch_size)
+		assert(batch:nDimension() >= 2)
+
+		for j, info in pairs(module_info) do
+			local target
+
+			if info.index == 1 then
+				target = batch:view(batch_size, batch[{{1}}]:nElement())
+			else
+				local input = model.modules[index - 1].output
+				assert(input:size(1) == batch_size)
+				target = input:view(batch_size, input[{{1}}]:nElement())
+			end
+
+			local sum_input_norm = target:norm(2, 2):sum()
+
+			local module = model.modules[info.index]
+			local w, g   = module.weight, module.gradOutput
+
+			assert(g:size(1) == batch_size)
+			local g_ = g:view(batch_size, g[{{1}}]:nElement())
+
+			local sum_grad_output_norm = g:norm(2, 2):sum()
+			local weight_norm = w:norm()
+			local c = sum_input_norm * sum_grad_output_norm / (info.output_count *
+				math.sqrt(batch_size) * weight_norm)
+
+			rates[j] = c
+		end
+
+		avg_rate = rates:prod():pow(1 / #module_info)
+		converged_layers = 0
+
+		for j, info in pairs(module_info) do
+			local module = model.modules[info.index]
+			local w, b   = module.weight, module.bias
+
+			local r = avg_rate / rates[j]
+			if math.abs(r - 1) < tol then converged_layers = converged_layers + 1 end
+
+			r = math.pow(r, dampening / 2)
+			ratios[j] = r
+
+			w:mul(r)
+			if b ~= nil then b:mul(r) end
+		end
+
+		if converged_layers == #module_info then return end
+	end)()
+
+	if converged_layers ~= #module_info then
+		print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
+			"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
+			"rate ratio within the specified number of iterations ({max_iters}).")
+
+		print(F"Geometric average of change rates across network: {avg_rate}.")
+
+		for j, info in pairs(module_info) do
+			local module      = model.modules[info.index]
+			local typename    = torch.typename(module)
+			local rate, ratio = rates[j], math.pow(ratios[j], 2 / dampening)
+
+			print(F"Layer {info.index} ({typename}). Change rate: {rate}; change ratio: {ratio}.")
+		end
+	end
 end
 
 return nninit
