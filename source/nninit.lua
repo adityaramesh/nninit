@@ -475,10 +475,10 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		assert(out:size(2) == info.output_groups)
 		local output_group_size = out[{{1}, {1}}]:nElement()
 
-		local out_ = out:view(batch_size, info.output_count, output_group_size):
+		local out_ = out:view(batch_size, info.output_groups, output_group_size):
 			transpose(1, 2):
 			clone():
-			view(info.output_count, batch_size * output_group_size)
+			view(info.output_groups, batch_size * output_group_size)
 
 		local mu = torch.mean(out_, 2)
 		local sigma = torch.std(out_, 2)
