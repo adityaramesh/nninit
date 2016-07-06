@@ -465,6 +465,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 	-- "Within-layer initialization"
 	for i, info in pairs(module_info) do
+		print("within layer init, iter " .. i)
 		fwd_eval_func()
 
 		local module    = info.module
@@ -504,6 +505,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 	-- "Between-layer initialization"
 	(function() for i = 1, max_iters do
+		print("between layer init, iter " .. i)
 		rates:zero()
 
 		for j = 1, batch_size do
@@ -511,12 +513,12 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 			for j, info in pairs(module_info) do
 				local gw = info.module.gradWeight
-				rates[j] = rates[j] + gw:norm():pow(2)
+				rates[j] = rates[j] + gw:norm()^2
 			end
 		end
 
 		rates:sqrt()
-		avg_rate = rates:prod():pow(1 / rates:size(1))
+		avg_rate = rates:prod()^(1 / rates:size(1))
 		converged_layers = 0
 
 		for j, info in pairs(module_info) do
@@ -526,7 +528,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			local r = avg_rate / rates[j]
 			if math.abs(r - 1) < tol then converged_layers = converged_layers + 1 end
 
-			r = math.pow(r, dampening / 2)
+			r = r^(dampening / 2)
 			ratios[j] = r
 
 			w:mul(r)
@@ -547,7 +549,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		for i, info in pairs(module_info) do
 			local module      = info.module
 			local typename    = torch.typename(module)
-			local rate, ratio = rates[i], math.pow(ratios[i], 2 / dampening)
+			local rate, ratio = rates[i], ratios[i]^(2 / dampening)
 
 			print(F"Layer {info.index} ({typename}). Change rate: {rate}; change ratio: {ratio}.")
 		end
