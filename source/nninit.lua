@@ -535,7 +535,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		end
 
 		if converged_layers == #module_info then return end
-	end)()
+	end end)()
 
 	if converged_layers ~= #module_info then
 		print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
