@@ -399,6 +399,9 @@ Implements the data-driven initialization method described in [1]. Note that the
 network should have already been initialized using a static initialization method. All biases should
 be initialized to zero.
 
+Notes:
+* Only transfer the model to the GPU **after** the initialization process.
+
 [1]: http://arxiv.org/pdf/1511.06856.pdf
 "Data-dependent initialization of convolutional neural networks"
 
@@ -420,65 +423,79 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 	local module_info = {}
 
-	for i, module in pairs(model.modules) do
-		local is_learnable = m.weight ~= nil or m.bias ~= nil
-
-		if is_learnable and i == #model.modules then
-			error("The last module in the network cannot be learnable, since there is " ..
-				"no way to obtain the gradient of the loss with respect to its outputs.")
-		end
+	for i = 1, #model.modules do
+		local module       = model.modules[i]
+		local w, b         = module.weight, module.bias
+		local is_learnable = w ~= nil or b ~= nil
 
 		-- Determine whether we know how to deal with this module type.
 		local status, fan_in, _ = pcall(function() return compute_fan(module) end)
 
 		if status then
-			local w, b = module.weight, module.bias
-			local output_count = w:size(1)
-			assert(w:nElement() == fan_in * output_count)
+			local output_groups = w:size(1)
+			assert(w:nElement() == fan_in * output_groups)
 
 			if b ~= nil then
 				assert(b:nDimension() == 1)
-				assert(b:size(1) == output_count)
-				assert(torch.all(torch.eq(bias, 0)))
+				assert(b:size(1) == output_groups)
+				assert(torch.all(torch.eq(b, 0)))
 			end
 
+			local scaling = nn.Mul()
+			scaling.weight[1] = 1
+			scaling.accGradParameters = function() end
+			model.modules[i] = nn.Sequential():add(module):add(scaling)
+
 			local info = {
-				index        = i,
-				fan_in       = fan_in,
-				output_count = output_count,
-				out_means    = w.new(output_count),
-				out_stds     = w.new(output_count),
+				index         = i,
+				module        = module,
+				scaling       = scaling,
+				fan_in        = fan_in,
+				output_groups = output_groups,
 			}
 
 			table.insert(module_info, info)
 		elseif is_learnable then
-			local typename = torch.typename(module)
+			local typename = torch.typename(m)
 			print(F"Warning: module {j} of type {typename} has learnable parameters "   ..
 				"but is unsupported. It will be ignored during the initialization " ..
-				"procedure. Please submit a feature request on Github.")
+				"procedure.")
 		end
 	end
 
 	-- "Within-layer initialization"
 	for i, info in pairs(module_info) do
-		fwd_eval_func(batch_size)
+		fwd_eval_func()
 
-		local module    = model.modules[info.index]
+		local module    = info.module
 		local w, b, out = module.weight, module.bias, module.output
 
 		assert(out:nDimension() >= 2)
 		assert(out:size(1) == batch_size)
-		local out_ = out:view(out:size(1), out[{{1}}]:nElement())
+		assert(out:size(2) == info.output_groups)
+		local output_group_size = out[{{1}, {1}}]:nElement()
 
-		local mu, sigma = info.out_means, info.out_stds
-		mu:mean(out_, 2)
-		sigma:std(out_, 2)
+		local out_ = out:view(batch_size, info.output_count, output_group_size):
+			transpose(1, 2):
+			clone():
+			view(info.output_count, batch_size * output_group_size)
 
-		local w_  = w:view(info.output_count, info.fan_in)
-		local mu_ = torch.expand(mu:view(info.output_count, 1), info.output_count, info.fan_in)
+		local mu = torch.mean(out_, 2)
+		local sigma = torch.std(out_, 2)
+
+		--[[
+		For linear layers, this divides each row of the weight matrix by the variance of the
+		corresponding activation. For convolutional layers, this divides the weight
+		corresponding to each output feature map by the varince of the activations in that
+		output feature map.
+		--]]
+		local w_  = w:view(info.output_groups, info.fan_in)
+		local mu_ = torch.expand(mu:view(info.output_groups, 1), info.output_groups, info.fan_in)
 		w_:cdiv(mu_)
 
 		if b ~= nil then b:fill(beta):addcdiv(b, -1, mu, sigma) end
+		out_ = nil
+		collectgarbage()
 	end
 
 	local rates = torch.Tensor(#module_info)
@@ -487,43 +504,24 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 	-- "Between-layer initialization"
 	(function() for i = 1, max_iters do
-		local batch = fwd_bwd_eval_func(batch_size)
-		assert(batch:size(1) == batch_size)
-		assert(batch:nDimension() >= 2)
+		rates:zero()
 
-		for j, info in pairs(module_info) do
-			local target
+		for j = 1, batch_size do
+			fwd_bwd_eval_func()
 
-			if info.index == 1 then
-				target = batch:view(batch_size, batch[{{1}}]:nElement())
-			else
-				local input = model.modules[index - 1].output
-				assert(input:size(1) == batch_size)
-				target = input:view(batch_size, input[{{1}}]:nElement())
+			for j, info in pairs(module_info) do
+				local gw = info.module.gradWeight
+				rates[j] = rates[j] + gw:norm():pow(2)
 			end
-
-			local sum_input_norm = target:norm(2, 2):sum()
-
-			local module = model.modules[info.index]
-			local w, g   = module.weight, model.modules[info.index + 1].gradInput
-
-			assert(g:size(1) == batch_size)
-			local g_ = g:view(batch_size, g[{{1}}]:nElement())
-
-			local sum_grad_output_norm = g:norm(2, 2):sum()
-			local weight_norm = w:norm()
-			local c = sum_input_norm * sum_grad_output_norm / (info.output_count *
-				math.sqrt(batch_size) * weight_norm)
-
-			rates[j] = c
 		end
 
-		avg_rate = rates:prod():pow(1 / #module_info)
+		rates:sqrt()
+		avg_rate = rates:prod():pow(1 / rates:size(1))
 		converged_layers = 0
 
 		for j, info in pairs(module_info) do
-			local module = model.modules[info.index]
-			local w, b   = module.weight, module.bias
+			local module, scaling = info.module, info.scaling
+			local w, b = module.weight, module.bias
 
 			local r = avg_rate / rates[j]
 			if math.abs(r - 1) < tol then converged_layers = converged_layers + 1 end
@@ -533,6 +531,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 			w:mul(r)
 			if b ~= nil then b:mul(r) end
+			scaling.weight[1] = 1 / r
 		end
 
 		if converged_layers == #module_info then return end
@@ -545,10 +544,10 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 		print(F"Geometric average of change rates across network: {avg_rate}.")
 
-		for j, info in pairs(module_info) do
-			local module      = model.modules[info.index]
+		for i, info in pairs(module_info) do
+			local module      = info.module
 			local typename    = torch.typename(module)
-			local rate, ratio = rates[j], math.pow(ratios[j], 2 / dampening)
+			local rate, ratio = rates[i], math.pow(ratios[i], 2 / dampening)
 
 			print(F"Layer {info.index} ({typename}). Change rate: {rate}; change ratio: {ratio}.")
 		end
