@@ -419,7 +419,7 @@ function nninit.data_driven(model, eval_func, args)
 	local verbose    = args.verbose    or true
 
 	assert(dampening > 0 and dampening < 1)
-	assert(batch_size > 0)
+	assert(batch_size > 1)
 	assert(max_iters > 0)
 	assert(tol > 0 and tol < 1)
 
@@ -427,6 +427,7 @@ function nninit.data_driven(model, eval_func, args)
 
 	for i = 1, #model.modules do
 		local module       = model.modules[i]
+		local typename     = torch.typename(module)
 		local w, b         = module.weight, module.bias
 		local is_learnable = w ~= nil or b ~= nil
 
@@ -434,7 +435,10 @@ function nninit.data_driven(model, eval_func, args)
 		local status, fan_in, _ = pcall(function() return compute_fan(module) end)
 
 		if status then
-			local output_groups = w:size(1)
+			local output_groups
+			if not typename:find('SpatialFullConvolution') then output_groups = w:size(1)
+			else output_groups = w:size(2) end
+
 			assert(w:nElement() == fan_in * output_groups)
 
 			if b ~= nil then
@@ -460,7 +464,6 @@ function nninit.data_driven(model, eval_func, args)
 
 			table.insert(module_info, info)
 		elseif is_learnable then
-			local typename = torch.typename(m)
 			print(F"Warning: module {j} of type {typename} has learnable parameters "   ..
 				"but is unsupported. It will be ignored during the initialization " ..
 				"procedure.")
@@ -474,6 +477,7 @@ function nninit.data_driven(model, eval_func, args)
 		eval_func(nil, false)
 
 		local module    = info.module
+		local typename  = torch.typename(module)
 		local w, b, out = module.weight, module.bias, module.output
 
 		assert(out:nDimension() >= 2)
@@ -494,10 +498,18 @@ function nninit.data_driven(model, eval_func, args)
 		corresponding to each output feature map by the varince of the activations in that
 		output feature map.
 		--]]
-		local w_     = w:view(info.output_groups, info.fan_in)
-		local sigma_ = torch.expand(sigma:view(info.output_groups, 1), info.output_groups, info.fan_in)
 
-		w_:cdiv(sigma_)
+		if not typename:find('SpatialFullConvolution') then
+			local w_     = w:view(info.output_groups, info.fan_in)
+			local sigma_ = torch.expand(sigma:view(info.output_groups, 1), info.output_groups, info.fan_in)
+			w_:cdiv(sigma_)
+		else
+			local s1, s3 = w:size(1), w[{{1}, {1}}]:nElement()
+			local w_     = w:view(s1, info.output_groups, s3)
+			local sigma_ = torch.expand(sigma:view(1, info.output_groups, 1), s1, info.output_groups, s3)
+			w_:cdiv(sigma_)
+		end
+
 		if b ~= nil and output_group_size ~= 1 then b:fill(beta):addcdiv(b, -1, mu, sigma) end
 		collectgarbage()
 
