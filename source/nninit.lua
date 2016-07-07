@@ -384,21 +384,11 @@ function nninit.make_spatial_upsampling_conv(args)
 end
 
 --[[
-Implements the data-driven LSUV initialization method described in [1]. Note that the weights of the
-network should have already been initialized using a static initialization method. All biases should
-be initialized to zero.
-
-[1]: http://arxiv.org/abs/1511.06422
-"All you need is a good init"
---]]
-function nninit.lsuv(module, eval_func, args)
-
-end
-
---[[
 Implements the data-driven initialization method described in [1]. Note that the weights of the
 network should have already been initialized using a static initialization method. All biases should
-be initialized to zero.
+be initialized to zero. The method described in [2] corresponds to only performing the intra-layer
+initialization in this implementation. Inter-layer initialization can be disabled using the option
+`do_inter_layer_init`.
 
 Notes:
 * Only transfer the model to the GPU **after** the initialization process.
@@ -406,18 +396,23 @@ Notes:
 [1]: http://arxiv.org/pdf/1511.06856.pdf
 "Data-dependent initialization of convolutional neural networks"
 
+[2]: http://arxiv.org/abs/1511.06422
+"All you need is a good init"
+
 - TODO: extension to non-feedforward architectures? Technically, the method described in [1] only
   applies to feedforward archiectures, but in practice, many models are not purely feedforward.
 --]]
 function nninit.data_driven(model, eval_func, args)
 	args = args or {}
-	local beta       = args.beta       or 0
-	local dampening  = args.dampening  or 0.5
-	local batch_size = args.batch_size or 128
-	local max_iters  = args.max_iters  or 50
-	local tol        = args.tol        or 1e-3
-	local verbose    = args.dry_run    or true
-	local dry_run    = args.dry_run    or false
+
+	local beta                = args.beta       or 0
+	local dampening           = args.dampening  or 0.5
+	local batch_size          = args.batch_size or 128
+	local max_iters           = args.max_iters  or 50
+	local tol                 = args.tol        or 1e-3
+	local verbose             = args.dry_run    or true
+	local dry_run             = args.dry_run    or false
+	local do_inter_layer_init = args.do_inter_layer_init or true
 
 	assert(dampening > 0 and dampening < 1)
 	assert(batch_size > 1)
@@ -459,7 +454,7 @@ function nninit.data_driven(model, eval_func, args)
 
 			local scaling
 
-			if not dry_run then
+			if not dry_run and do_inter_layer_init then
 				scaling = nn.Mul()
 				scaling.weight[1] = 1
 				scaling.accGradParameters = function() end
@@ -541,6 +536,8 @@ function nninit.data_driven(model, eval_func, args)
 			print(F"Layer {info.index}. Output mean: {out:mean()}; output std: {out:std()}.")
 		end
 	end
+
+	if not do_inter_layer_init then return end
 
 	local rates = torch.Tensor(#module_info)
 	local ratios = torch.Tensor(#module_info)
