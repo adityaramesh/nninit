@@ -416,7 +416,8 @@ function nninit.data_driven(model, eval_func, args)
 	local batch_size = args.batch_size or 128
 	local max_iters  = args.max_iters  or 50
 	local tol        = args.tol        or 1e-3
-	local verbose    = args.verbose    or true
+	local verbose    = args.dry_run    or true
+	local dry_run    = args.dry_run    or false
 
 	assert(dampening > 0 and dampening < 1)
 	assert(batch_size > 1)
@@ -428,6 +429,15 @@ function nninit.data_driven(model, eval_func, args)
 	for i = 1, #model.modules do
 		local module       = model.modules[i]
 		local typename     = torch.typename(module)
+
+		-- If this model has already been processed by this function, then all of the
+		-- learnable modules will be nested in `nn.Sequential` containers.
+		if typename == 'nn.Sequential' and #module.modules == 2 and
+		   torch.typename(module.modules[2]) == 'nn.Mul' then
+			module = module.modules[1]
+			typename = torch.typename(module)
+		end
+
 		local w, b         = module.weight, module.bias
 		local is_learnable = w ~= nil or b ~= nil
 
@@ -444,15 +454,19 @@ function nninit.data_driven(model, eval_func, args)
 			if b ~= nil then
 				assert(b:nDimension() == 1)
 				assert(b:size(1) == output_groups)
-				assert(torch.all(torch.eq(b, 0)))
+				--assert(torch.all(torch.eq(b, 0)))
 			end
 
-			local scaling = nn.Mul()
-			scaling.weight[1] = 1
-			scaling.accGradParameters = function() end
-			if w:type() == 'torch.CudaTensor' then scaling:cuda() end
+			local scaling
 
-			model.modules[i] = nn.Sequential():add(module):add(scaling)
+			if not dry_run then
+				scaling = nn.Mul()
+				scaling.weight[1] = 1
+				scaling.accGradParameters = function() end
+				if w:type() == 'torch.CudaTensor' then scaling:cuda() end
+
+				model.modules[i] = nn.Sequential():add(module):add(scaling)
+			end
 
 			local info = {
 				index         = i,
@@ -473,47 +487,49 @@ function nninit.data_driven(model, eval_func, args)
 	if verbose then print("Intra-layer initialization.") end
 
 	-- "Within-layer initialization"
-	for i, info in pairs(module_info) do
-		eval_func(nil, false)
+	if not dry_run then
+		for i, info in pairs(module_info) do
+			eval_func(nil, false)
 
-		local module    = info.module
-		local typename  = torch.typename(module)
-		local w, b, out = module.weight, module.bias, module.output
+			local module    = info.module
+			local typename  = torch.typename(module)
+			local w, b, out = module.weight, module.bias, module.output
 
-		assert(out:nDimension() >= 2)
-		assert(out:size(1) == batch_size)
-		assert(out:size(2) == info.output_groups)
-		local output_group_size = out[{{1}, {1}}]:nElement()
+			assert(out:nDimension() >= 2)
+			assert(out:size(1) == batch_size)
+			assert(out:size(2) == info.output_groups)
+			local output_group_size = out[{{1}, {1}}]:nElement()
 
-		local out_ = out:view(batch_size, info.output_groups, output_group_size)
-			:transpose(1, 2)
-			:clone()
-			:view(info.output_groups, batch_size * output_group_size)
+			local out_ = out:view(batch_size, info.output_groups, output_group_size)
+				:transpose(1, 2)
+				:clone()
+				:view(info.output_groups, batch_size * output_group_size)
 
-		local mu, sigma = out_:mean(2), out_:std(2)
+			local mu, sigma = out_:mean(2), out_:std(2)
 
-		--[[
-		For linear layers, this divides each row of the weight matrix by the variance of the
-		corresponding activation. For convolutional layers, this divides the weight
-		corresponding to each output feature map by the varince of the activations in that
-		output feature map.
-		--]]
+			--[[
+			For linear layers, this divides each row of the weight matrix by the variance of the
+			corresponding activation. For convolutional layers, this divides the weight
+			corresponding to each output feature map by the varince of the activations in that
+			output feature map.
+			--]]
 
-		if not typename:find('SpatialFullConvolution') then
-			local w_     = w:view(info.output_groups, info.fan_in)
-			local sigma_ = torch.expand(sigma:view(info.output_groups, 1), info.output_groups, info.fan_in)
-			w_:cdiv(sigma_)
-		else
-			local s1, s3 = w:size(1), w[{{1}, {1}}]:nElement()
-			local w_     = w:view(s1, info.output_groups, s3)
-			local sigma_ = torch.expand(sigma:view(1, info.output_groups, 1), s1, info.output_groups, s3)
-			w_:cdiv(sigma_)
+			if not typename:find('SpatialFullConvolution') then
+				local w_     = w:view(info.output_groups, info.fan_in)
+				local sigma_ = torch.expand(sigma:view(info.output_groups, 1), info.output_groups, info.fan_in)
+				w_:cdiv(sigma_)
+			else
+				local s1, s3 = w:size(1), w[{{1}, {1}}]:nElement()
+				local w_     = w:view(s1, info.output_groups, s3)
+				local sigma_ = torch.expand(sigma:view(1, info.output_groups, 1), s1, info.output_groups, s3)
+				w_:cdiv(sigma_)
+			end
+
+			if b ~= nil and output_group_size ~= 1 then b:fill(beta):addcdiv(b, -1, mu, sigma) end
+			collectgarbage()
+
+			if verbose then xlua.progress(i, #module_info) end
 		end
-
-		if b ~= nil and output_group_size ~= 1 then b:fill(beta):addcdiv(b, -1, mu, sigma) end
-		collectgarbage()
-
-		if verbose then xlua.progress(i, #module_info) end
 	end
 
 	if verbose then
@@ -530,7 +546,7 @@ function nninit.data_driven(model, eval_func, args)
 	local ratios = torch.Tensor(#module_info)
 	local avg_rate, converged_layers = 0, 0
 
-	if verbose then print("Inter-layer initialization.") end
+	if verbose then print("\nInter-layer initialization.") end
 
 	-- "Between-layer initialization"
 	(function() for i = 1, max_iters do
@@ -562,17 +578,19 @@ function nninit.data_driven(model, eval_func, args)
 			r = r^dampening
 			ratios[j] = r
 
-			w:div(r)
-			if b ~= nil then b:div(r) end
-			scaling.weight[1] = r
+			if not dry_run then
+				w:div(r)
+				if b ~= nil then b:div(r) end
+				scaling.weight[1] = r
+			end
 		end
 
-		if converged_layers == #module_info then return end
+		if dry_run or converged_layers == #module_info then return end
 		if verbose then xlua.progress(i, max_iters) end
 	end end)()
 
 	if verbose or converged_layers ~= #module_info then
-		if converged_layers ~= #module_info then
+		if not dry_run and converged_layers ~= #module_info then
 			print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
 				F"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
 				F"rate ratio within the specified number of iterations ({max_iters}).")
