@@ -413,7 +413,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 	local beta       = args.beta       or 0
 	local dampening  = args.dampening  or 0.25
 	local batch_size = args.batch_size or 128
-	local max_iters  = args.max_iters  or 20   -- TODO: find a reasonable value instead of guessing.
+	local max_iters  = args.max_iters  or 50   -- TODO: find a reasonable value instead of guessing.
 	local tol        = args.tol        or 1e-5 -- TODO: find a reasonable value instead of guessing.
 
 	assert(dampening > 0 and dampening < 1)
@@ -476,13 +476,12 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		assert(out:size(2) == info.output_groups)
 		local output_group_size = out[{{1}, {1}}]:nElement()
 
-		local out_ = out:view(batch_size, info.output_groups, output_group_size):
-			transpose(1, 2):
-			clone():
-			view(info.output_groups, batch_size * output_group_size)
+		local out_ = out:view(batch_size, info.output_groups, output_group_size)
+			:transpose(1, 2)
+			:clone()
+			:view(info.output_groups, batch_size * output_group_size)
 
-		local mu = torch.mean(out_, 2)
-		local sigma = torch.std(out_, 2)
+		local mu, sigma = out_:mean(2), out_:std(2)
 
 		--[[
 		For linear layers, this divides each row of the weight matrix by the variance of the
@@ -490,13 +489,22 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		corresponding to each output feature map by the varince of the activations in that
 		output feature map.
 		--]]
-		local w_  = w:view(info.output_groups, info.fan_in)
-		local mu_ = torch.expand(mu:view(info.output_groups, 1), info.output_groups, info.fan_in)
-		w_:cdiv(mu_)
+		local w_     = w:view(info.output_groups, info.fan_in)
+		local sigma_ = torch.expand(sigma:view(info.output_groups, 1), info.output_groups, info.fan_in)
 
-		if b ~= nil then b:fill(beta):addcdiv(b, -1, mu, sigma) end
-		out_ = nil
+		w_:cdiv(sigma_)
+		if b ~= nil and output_group_size ~= 1 then b:fill(beta):addcdiv(b, -1, mu, sigma) end
 		collectgarbage()
+	end
+
+	for i, info in pairs(module_info) do
+		-- TODO clean this up and make it a debug feature
+		print("within layer init, iter " .. i)
+		fwd_eval_func()
+
+		local module    = info.module
+		local w, b, out = module.weight, module.bias, module.output
+		print(out:mean(), out:std())
 	end
 
 	local rates = torch.Tensor(#module_info)
@@ -511,13 +519,16 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		for j = 1, batch_size do
 			fwd_bwd_eval_func()
 
-			for j, info in pairs(module_info) do
+			for k, info in pairs(module_info) do
 				local gw = info.module.gradWeight
-				rates[j] = rates[j] + gw:norm()^2
+				rates[k] = rates[k] + gw:norm()
 			end
 		end
 
-		rates:sqrt()
+		for j, info in pairs(module_info) do
+			rates[j] = rates[j] / (batch_size * info.module.weight:norm())
+		end
+
 		avg_rate = rates:prod()^(1 / rates:size(1))
 		converged_layers = 0
 
@@ -531,9 +542,9 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			r = r^(dampening / 2)
 			ratios[j] = r
 
-			w:mul(r)
-			if b ~= nil then b:mul(r) end
-			scaling.weight[1] = 1 / r
+			w:div(r)
+			if b ~= nil then b:div(r) end
+			scaling.weight[1] = r
 		end
 
 		if converged_layers == #module_info then return end
@@ -541,8 +552,8 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 
 	if converged_layers ~= #module_info then
 		print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
-			"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
-			"rate ratio within the specified number of iterations ({max_iters}).")
+			F"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
+			F"rate ratio within the specified number of iterations ({max_iters}).")
 
 		print(F"Geometric average of change rates across network: {avg_rate}.")
 
