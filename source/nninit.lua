@@ -2,8 +2,9 @@
 Adapted from `https://github.com/Kaixhin`.
 --]]
 
-local F = require('F')
-local nn = require('nn')
+local F    = require('F')
+local nn   = require('nn')
+local xlua = require('xlua')
 
 --[[
 Returns the fan-in and the fan-out of the given module. The fan-in is the number of inputs used to
@@ -408,13 +409,14 @@ Notes:
 - TODO: extension to non-feedforward architectures? Technically, the method described in [1] only
   applies to feedforward archiectures, but in practice, many models are not purely feedforward.
 --]]
-function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
+function nninit.data_driven(model, eval_func, args)
 	args = args or {}
 	local beta       = args.beta       or 0
-	local dampening  = args.dampening  or 0.25
+	local dampening  = args.dampening  or 0.5
 	local batch_size = args.batch_size or 128
-	local max_iters  = args.max_iters  or 50   -- TODO: find a reasonable value instead of guessing.
-	local tol        = args.tol        or 1e-5 -- TODO: find a reasonable value instead of guessing.
+	local max_iters  = args.max_iters  or 50
+	local tol        = args.tol        or 1e-3
+	local verbose    = args.verbose    or true
 
 	assert(dampening > 0 and dampening < 1)
 	assert(batch_size > 0)
@@ -444,6 +446,8 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			local scaling = nn.Mul()
 			scaling.weight[1] = 1
 			scaling.accGradParameters = function() end
+			if w:type() == 'torch.CudaTensor' then scaling:cuda() end
+
 			model.modules[i] = nn.Sequential():add(module):add(scaling)
 
 			local info = {
@@ -463,10 +467,11 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		end
 	end
 
+	if verbose then print("Intra-layer initialization.") end
+
 	-- "Within-layer initialization"
 	for i, info in pairs(module_info) do
-		print("within layer init, iter " .. i)
-		fwd_eval_func()
+		eval_func(nil, false)
 
 		local module    = info.module
 		local w, b, out = module.weight, module.bias, module.output
@@ -495,29 +500,32 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		w_:cdiv(sigma_)
 		if b ~= nil and output_group_size ~= 1 then b:fill(beta):addcdiv(b, -1, mu, sigma) end
 		collectgarbage()
+
+		if verbose then xlua.progress(i, #module_info) end
 	end
 
-	for i, info in pairs(module_info) do
-		-- TODO clean this up and make it a debug feature
-		print("within layer init, iter " .. i)
-		fwd_eval_func()
+	if verbose then
+		for i, info in pairs(module_info) do
+			eval_func(nil, false)
 
-		local module    = info.module
-		local w, b, out = module.weight, module.bias, module.output
-		print(out:mean(), out:std())
+			local module    = info.module
+			local w, b, out = module.weight, module.bias, module.output
+			print(F"Layer {info.index}. Output mean: {out:mean()}; output std: {out:std()}.")
+		end
 	end
 
 	local rates = torch.Tensor(#module_info)
 	local ratios = torch.Tensor(#module_info)
 	local avg_rate, converged_layers = 0, 0
 
+	if verbose then print("Inter-layer initialization.") end
+
 	-- "Between-layer initialization"
 	(function() for i = 1, max_iters do
-		print("between layer init, iter " .. i)
 		rates:zero()
 
 		for j = 1, batch_size do
-			fwd_bwd_eval_func()
+			eval_func(j, true)
 
 			for k, info in pairs(module_info) do
 				local gw = info.module.gradWeight
@@ -539,7 +547,7 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 			local r = avg_rate / rates[j]
 			if math.abs(r - 1) < tol then converged_layers = converged_layers + 1 end
 
-			r = r^(dampening / 2)
+			r = r^dampening
 			ratios[j] = r
 
 			w:div(r)
@@ -548,19 +556,22 @@ function nninit.data_driven(model, fwd_eval_func, fwd_bwd_eval_func, args)
 		end
 
 		if converged_layers == #module_info then return end
+		if verbose then xlua.progress(i, max_iters) end
 	end end)()
 
-	if converged_layers ~= #module_info then
-		print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
-			F"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
-			F"rate ratio within the specified number of iterations ({max_iters}).")
+	if verbose or converged_layers ~= #module_info then
+		if converged_layers ~= #module_info then
+			print(F"Warning: {#module_info - converged_layers} / {#module_info} layers did "  ..
+				F"not satisfy the specified tolerance ({tol}) for the inter-layer change " ..
+				F"rate ratio within the specified number of iterations ({max_iters}).")
+		end
 
 		print(F"Geometric average of change rates across network: {avg_rate}.")
 
 		for i, info in pairs(module_info) do
 			local module      = info.module
 			local typename    = torch.typename(module)
-			local rate, ratio = rates[i], ratios[i]^(2 / dampening)
+			local rate, ratio = rates[i], ratios[i]^(1 / dampening)
 
 			print(F"Layer {info.index} ({typename}). Change rate: {rate}; change ratio: {ratio}.")
 		end

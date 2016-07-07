@@ -3,10 +3,10 @@ version = '0.0-0'
 
 source = {
 	-- Use this for quick installation from local sources during development.
-	url = '.',
-	dir = '.',
-	-- url = 'git://github.com/adityaramesh/nninit',
-	-- branch = 'master'
+	-- url = '.',
+	-- dir = '.',
+	url = 'git://github.com/adityaramesh/nninit',
+	branch = 'master'
 }
 
 description = {
@@ -18,6 +18,7 @@ description = {
 dependencies = {
 	'torch >= 7.0',
 	'nn',
+	'xlua',
 	'image',
 	'f-strings'
 }
