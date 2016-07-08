@@ -131,21 +131,46 @@ vector, and ensure that all of these vectors are orthonormal.
 --]]
 function nninit.orthogonal(module, gain)
 	local w = module.weight
-	local rows = w:size(1)
-	local cols = w:size(2)
-	for i = 3, w:nDimension() do cols = cols * w:size(i) end
+	local rows, cols
+
+	if not torch.typename(module):find('SpatialFullConvolution') then
+		rows, cols = w:size(1), w:size(2)
+		for i = 3, w:nDimension() do cols = cols * w:size(i) end
+	else
+		rows, cols = w:size(2), w:size(1)
+		for i = 3, w:nDimension() do cols = cols * w:size(i) end
+	end
 
 	local seed = w.new(rows, cols):normal(0, 1)
 	local u, _, v = torch.svd(seed, 'S')
 
 	local q
-	if u:size(2) == cols then q = u
-	else q = v:t() end
 
-	assert(q:size(1) == rows)
-	assert(q:size(2) == cols)
+	if u:size(2) == cols then
+		q = u
+	else
+		q = v:t()
+
+		--[[
+		XXX: As of the time of writing, if Torch is set up to use MKL for BLAS, then using
+		the 'S' option with SVD can yield the same results as 'A', even when this should not
+		be the case. For example, try SVD with the 'S' option on a 200 x 4096 matrix -- U is
+		4096 x 4096, when it should be 4096 x 200.
+
+		Remove this workaround after the bug mentioned above is fixed.
+		--]]
+		if rows ~= cols and q:size(1) == q:size(2) then
+			q = q[{{1, math.min(rows, cols)}, {}}]
+		end
+	end
+
+	assert(
+		(q:size(1) == rows and q:size(2) == math.min(rows, cols)) or
+		(q:size(1) == math.min(rows, cols) and q:size(2) == cols)
+	)
 
 	q:resizeAs(w):mul(math.sqrt(gain))
+	if torch.typename(module):find('SpatialFullConvolution') then q = q:transpose(1, 2):clone() end
 	w:copy(q)
 
 	if module.bias ~= nil then
@@ -412,7 +437,9 @@ function nninit.data_driven(model, eval_func, args)
 	local tol                 = args.tol        or 1e-3
 	local verbose             = args.dry_run    or true
 	local dry_run             = args.dry_run    or false
-	local do_inter_layer_init = args.do_inter_layer_init or true
+	local do_inter_layer_init = args.do_inter_layer_init
+
+	if do_inter_layer_init == nil then do_inter_layer_init = true end
 
 	assert(dampening > 0 and dampening < 1)
 	assert(batch_size > 1)
