@@ -143,7 +143,6 @@ function nninit.orthogonal(module, gain)
 
 	local seed = w.new(rows, cols):normal(0, 1)
 	local u, _, v = torch.svd(seed, 'S')
-
 	local q
 
 	if u:size(2) == cols then
