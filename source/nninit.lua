@@ -426,7 +426,7 @@ function nninit.make_spatial_blur_conv(args)
 	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, kw / 2
 	else pad_lt, pad_rb = kw / 2, kw / 2 end
 
-	local kernel = image.gaussian({size = kw, normalize = true, sigma = std}):view(1, 1, kw)
+	local kernel = image.gaussian({size = kw, normalize = true, sigma = std}):view(1, 1, kw, kw)
 	local conv = SpatialConvolution(1, 1, kw, kw)
 	conv.bias, conv.gradBias = nil, nil
 	conv.weight:copy(kernel)
