@@ -415,11 +415,14 @@ function make_spatial_blur_conv(args)
 	local iw = args.input_width
 	assert(iw >= kw)
 
+	local std = args.std or 0.25
+	assert(std > 0)
+
 	local pad_lt, pad_rb
 	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, kw / 2
 	else pad_lt, pad_rb = kw / 2, kw / 2 end
 
-	local kernel = image.gaussian({size = kw, normalize = true}):view(1, 1, kw)
+	local kernel = image.gaussian({size = kw, normalize = true, sigma = std}):view(1, 1, kw)
 	local conv = nn.SpatialConvolution(1, 1, kw, kw)
 	conv.bias, conv.gradBias = nil, nil
 	conv.weight:copy(kernel)
