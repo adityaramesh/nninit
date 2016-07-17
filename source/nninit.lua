@@ -2,9 +2,10 @@
 Adapted from `https://github.com/Kaixhin`.
 --]]
 
-local F    = require('F')
-local nn   = require('nn')
-local xlua = require('xlua')
+local F     = require('F')
+local nn    = require('nn')
+local xlua  = require('xlua')
+local image = require('image')
 
 --[[
 Returns the fan-in and the fan-out of the given module. The fan-in is the number of inputs used to
@@ -405,6 +406,29 @@ function nninit.make_spatial_upsampling_conv(args)
 			add(m):
 			add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
 	end
+end
+
+function make_spatial_blur_conv(args)
+	local kw, fm_in, k = validate_common_conv_args(args)
+	assert(k == 1)
+
+	local iw = args.input_width
+	assert(iw >= kw)
+
+	local pad_lt, pad_rb
+	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, kw / 2
+	else pad_lt, pad_rb = kw / 2, kw / 2 end
+
+	local kernel = image.gaussian({size = kw, normalize = true}):view(1, 1, kw)
+	local conv = nn.SpatialConvolution(1, 1, kw, kw)
+	conv.bias, conv.gradBias = nil, nil
+	conv.weight:copy(kernel)
+
+	return nn.Sequential()
+		:add(nn.View(-1, iw, iw))
+		:add(nn.SpatialReplicationPadding(pad_lt, pad_rb, pad_lt, pad_rb))
+		:add(conv)
+		:add(nn.View(-1, fm_in, iw, iw))
 end
 
 --[[
