@@ -412,7 +412,7 @@ function nninit.make_spatial_upsampling_conv(args)
 	end
 end
 
-function make_spatial_blur_conv(args)
+function nninit.make_spatial_blur_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
 	assert(k == 1)
 
