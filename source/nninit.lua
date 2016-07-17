@@ -432,7 +432,7 @@ function nninit.make_spatial_blur_conv(args)
 	conv.weight:copy(kernel)
 
 	return nn.Sequential()
-		:add(nn.View(-1, iw, iw))
+		:add(nn.View(-1, 1, iw, iw))
 		:add(nn.SpatialReplicationPadding(pad_lt, pad_rb, pad_lt, pad_rb))
 		:add(conv)
 		:add(nn.View(-1, fm_in, iw, iw))
