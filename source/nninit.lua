@@ -2,9 +2,14 @@
 Adapted from `https://github.com/Kaixhin`.
 --]]
 
-local F    = require('F')
-local nn   = require('nn')
-local xlua = require('xlua')
+local F     = require('F')
+local nn    = require('nn')
+local xlua  = require('xlua')
+local image = require('image')
+
+local lib = cudnn or nn
+local SpatialConvolution = lib.SpatialConvolution
+local SpatialFullConvolution = lib.SpatialFullConvolution
 
 --[[
 Returns the fan-in and the fan-out of the given module. The fan-in is the number of inputs used to
@@ -189,7 +194,7 @@ local function validate_common_conv_args(args)
 end
 
 --[[
-Returns an `nn.SpatialConvolution` layer initialized such that each group of $k$ consecutive output
+Returns an `SpatialConvolution` layer initialized such that each group of $k$ consecutive output
 feature maps copies the same input feature map.
 
 TODO: Support for non-square inputs.
@@ -210,7 +215,7 @@ function nninit.make_identity_spatial_conv(args)
 
 	if kw % 2 == 0 then
 		local pw = 0
-		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
+		local m = SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
 		local w, b = m.weight, m.bias
 
 		w:zero()
@@ -231,7 +236,7 @@ function nninit.make_identity_spatial_conv(args)
 			add(m)
 	else
 		local pw = (kw - 1) / 2
-		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
+		local m = SpatialConvolution(fm_in, fm_out, kw, kw, dw, dw, pw, pw)
 		local w, b = m.weight, m.bias
 
 		w:zero()
@@ -249,7 +254,7 @@ function nninit.make_identity_spatial_conv(args)
 end
 
 --[[
-Returns a strided `nn.SpatialConvolution` layer initialized such that each group of $k$ consecutive
+Returns a strided `SpatialConvolution` layer initialized such that each group of $k$ consecutive
 output feature maps downsamples the same input feature map.
 
 Note: this doesn't match the result of upsampling using `image.scale`, but (1) I don't have time to
@@ -283,7 +288,7 @@ function nninit.make_spatial_average_downsampling_conv(args)
 
 	if extra_width % 2 == 0 then
 		local pw = extra_width / 2
-		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
+		local m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
 		local w, b = m.weight, m.bias
 
 		w:zero()
@@ -306,7 +311,7 @@ function nninit.make_spatial_average_downsampling_conv(args)
 		end
 	else
 		local pw = 0
-		local m = nn.SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
+		local m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
 		local w, b = m.weight, m.bias
 
 		w:zero()
@@ -374,8 +379,8 @@ function nninit.lanczos(a)
 end
 
 --[[
-Returns a `nn.SpatialFullConvolution` layer initialized such that each group of $k$ consecutive
-output feature maps upsamples the same input feature map.
+Returns a `SpatialFullConvolution` layer initialized such that each group of $k$ consecutive output
+feature maps upsamples the same input feature map.
 
 TODO: Support for non-square inputs.
 --]]
@@ -426,7 +431,7 @@ function nninit.make_spatial_upsampling_conv(args)
 		aw = 0
 	end
 
-	m = nn.SpatialFullConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw, aw, aw)
+	m = SpatialFullConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw, aw, aw)
 
 	local w, b = m.weight, m.bias
 	w:zero()
@@ -451,6 +456,30 @@ function nninit.make_spatial_upsampling_conv(args)
 			:add(m)
 			:add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
 	end
+end
+
+function nninit.make_spatial_blur_conv(args)
+	local kw, fm_in, k = validate_common_conv_args(args)
+	assert(k == 1)
+
+	local iw = args.input_width
+	local std = args.std or 0.25
+	assert(std > 0)
+
+	local pad_lt, pad_rb
+	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, kw / 2
+	else pad_lt, pad_rb = (kw - 1) / 2, (kw - 1) / 2 end
+
+	local kernel = image.gaussian({size = kw, normalize = true, sigma = std}):view(1, 1, kw, kw)
+	local conv = SpatialConvolution(1, 1, kw, kw)
+	conv.bias, conv.gradBias = nil, nil
+	conv.weight:copy(kernel)
+
+	return nn.Sequential()
+		:add(nn.View(-1, 1, iw, iw))
+		:add(nn.SpatialReplicationPadding(pad_lt, pad_rb, pad_lt, pad_rb))
+		:add(conv)
+		:add(nn.View(-1, fm_in, iw, iw))
 end
 
 --[[
