@@ -259,7 +259,7 @@ original image less and retains more sharpness in the examples that I tested.
 TODO: Support for non-square inputs.
 TODO: Support for perforated convolutions?
 --]]
-function nninit.make_spatial_downsampling_conv(args)
+function nninit.make_spatial_average_downsampling_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
 	local fm_out       = k * fm_in
 	local scale        = args.scale
@@ -336,6 +336,43 @@ function nninit.make_spatial_downsampling_conv(args)
 	end
 end
 
+function nninit.bilinear(scale)
+	assert(scale >= 1)
+
+	local kw = 2 * scale - 1
+	local v  = torch.Tensor(kw)
+
+	for i = 1, kw do v[i] = 1 - math.abs(i - scale) / scale end
+	return torch.ger(v, v)
+end
+
+function nninit.lanczos(a)
+	assert(a == 2 or a == 3)
+
+	return function(scale)
+		assert(scale >= 1)
+
+		local kw     = 2 * a * scale - 1
+		local origin = math.floor((kw + 1) / 2)
+		local sinc   = function(x) return math.sin(math.pi * x) / (math.pi * x) end
+		local v      = torch.Tensor(kw)
+
+		for i = 1, kw do
+			local x = (i - origin) / scale
+
+			if math.abs(x) >= a then
+				v[i] = 0
+			elseif x == 0 then
+				v[i] = 1
+			else
+				v[i] = sinc(x) * sinc(x / a)
+			end
+		end
+
+		return torch.ger(v, v)
+	end
+end
+
 --[[
 Returns a `nn.SpatialFullConvolution` layer initialized such that each group of $k$ consecutive
 output feature maps upsamples the same input feature map.
@@ -348,16 +385,26 @@ function nninit.make_spatial_upsampling_conv(args)
 	local scale        = args.scale
 
 	assert(scale >= 1)
-	local inner_width = 2 * scale - 1
-	assert(kw >= inner_width)
+
+	local kernel = args.kernel or nninit.bilinear
+	local init   = kernel(scale, inner_width)
+
+	assert(init:nDimension() == 2)
+	assert(init:size(1) == init:size(2))
+
+	local inner_width = init:size(1)
 	local extra_width = kw - inner_width
+	local extent      = (inner_width + 1) / (2 * scale)
+
+	assert(kw >= inner_width)
+	assert(extent == math.floor(extent))
 
 	--[[
 	Some explanations for the variables:
 	  - `extra_width`: If `kw > inner_width`, then in order to produce the same output as the
-	    case where `kw == inner_width`, we initialize the bottom-left `inner_width x
-	    inner_width` block of the kernel to perform bilinear upsampling, and set the remaining
-	    border along the top and right of the image to zero.
+	    case where `kw == inner_width`, we initialize the bottom-right `inner_width x
+	    inner_width` block of the kernel to perform upsampling, and set the remaining border
+	    along the top and left of the image to zero.
 	  - `aw`: Note that the width of the "pure" part of the output image that is not affected by
 	    the `SpatialReplicationPadding` is given by `o_w = scale * (i_w - 1) + 1`. The desired
 	    width of the output image is `scale * i_w`, so we must extend the width of the image by
@@ -366,15 +413,16 @@ function nninit.make_spatial_upsampling_conv(args)
 	    the image, so there is no asymmetry. Otherwise, we choose arbitrarily to use an extra
 	    row and column from the bottom and right side of the image, respectively. This is
 	    accomplished by adding one to the `adjW` and `adjH` parameters of
-	    `SpatialFullConvolution`.
+	    `SpatialFullConvolution`. This is the represented by the second term in the expression
+	    for `pw` below.
 	--]]
 	local pw, aw, m
 
 	if scale % 2 == 0 then
-		pw = scale + scale / 2
+		pw = (inner_width + 1) / 2 + scale / 2 + scale * (extent - 1)
 		aw = 1
 	else
-		pw = scale + (scale - 1) / 2
+		pw = (inner_width + 1) / 2 + (scale - 1) / 2 + scale * (extent - 1)
 		aw = 0
 	end
 
@@ -383,10 +431,6 @@ function nninit.make_spatial_upsampling_conv(args)
 	local w, b = m.weight, m.bias
 	w:zero()
 	b:zero()
-
-	local v = torch.Tensor(inner_width)
-	for i = 1, inner_width do v[i] = 1 - math.abs(i - scale) / scale end
-	local init = torch.ger(v, v)
 
 	for i = 1, fm_in do
 		for j = 1, k do
@@ -397,13 +441,15 @@ function nninit.make_spatial_upsampling_conv(args)
 	end
 
 	if extra_width == 0 then
-		return nn.Sequential():add(nn.SpatialReplicationPadding(1, 1, 1, 1)):add(m)
+		return nn.Sequential()
+			:add(nn.SpatialReflectionPadding(extent, extent, extent, extent))
+			:add(m)
 	else
 		-- XXX: cropping using `SpatialZeroPadding` is very slow.
-		return nn.Sequential():
-			add(nn.SpatialReplicationPadding(1, 1, 1, 1)):
-			add(m):
-			add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
+		return nn.Sequential()
+			:add(nn.SpatialReflectionPadding(extent, extent, extent, extent))
+			:add(m)
+			:add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
 	end
 end
 
