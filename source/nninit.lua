@@ -351,33 +351,6 @@ function nninit.bilinear(scale)
 	return torch.ger(v, v)
 end
 
-function nninit.lanczos(a)
-	assert(a == 2 or a == 3)
-
-	return function(scale)
-		assert(scale >= 1)
-
-		local kw     = 2 * a * scale - 1
-		local origin = math.floor((kw + 1) / 2)
-		local sinc   = function(x) return math.sin(math.pi * x) / (math.pi * x) end
-		local v      = torch.Tensor(kw)
-
-		for i = 1, kw do
-			local x = (i - origin) / scale
-
-			if math.abs(x) >= a then
-				v[i] = 0
-			elseif x == 0 then
-				v[i] = 1
-			else
-				v[i] = sinc(x) * sinc(x / a)
-			end
-		end
-
-		return torch.ger(v, v)
-	end
-end
-
 --[[
 Returns a `SpatialFullConvolution` layer initialized such that each group of $k$ consecutive output
 feature maps upsamples the same input feature map.
