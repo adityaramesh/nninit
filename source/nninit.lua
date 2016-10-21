@@ -187,7 +187,7 @@ local function validate_common_conv_args(args)
 	local fm_in = args.n_maps_in
 	local k     = args.expansion_factor
 
-	assert(kw >= 1)
+	assert(kw == nil or kw >= 1)
 	assert(fm_in >= 1)
 	assert(k >= 1, "Only positive, integral expansion factors are supported.")
 	return kw, fm_in, k
@@ -264,6 +264,10 @@ original image less and retains more sharpness in the examples that I tested.
 TODO: Support for non-square inputs.
 TODO: Support for perforated convolutions?
 --]]
+
+--[[
+XXX: remove this later.
+
 function nninit.make_spatial_average_downsampling_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
 	local fm_out       = k * fm_in
@@ -340,14 +344,31 @@ function nninit.make_spatial_average_downsampling_conv(args)
 		end
 	end
 end
+--]]
 
 function nninit.bilinear(scale)
+	--[[
 	assert(scale >= 1)
 
-	local kw = 2 * scale - 1
-	local v  = torch.Tensor(kw)
+	local kw     = 2 * scale - 1
+	local origin = (kw + 1) / 2
+	local v      = torch.Tensor(kw)
 
-	for i = 1, kw do v[i] = 1 - math.abs(i - scale) / scale end
+	for i = 1, kw do v[i] = 1 - math.abs(i - origin) / scale end
+	return torch.ger(v, v)
+	--]]
+
+	assert(scale >= 1)
+
+	local kw     = scale
+	local origin = (kw + 1) / 2
+	local v      = torch.Tensor(kw)
+
+	for i = 1, kw do v[i] = 1 - math.abs(i - origin) end
+	v:div(v:sum())
+
+	print(v)
+
 	return torch.ger(v, v)
 end
 
@@ -365,13 +386,9 @@ function nninit.lanczos(a)
 		for i = 1, kw do
 			local x = (i - origin) / scale
 
-			if math.abs(x) >= a then
-				v[i] = 0
-			elseif x == 0 then
-				v[i] = 1
-			else
-				v[i] = sinc(x) * sinc(x / a)
-			end
+			if math.abs(x) >= a then v[i] = 0
+			elseif x == 0       then v[i] = 1
+			else                     v[i] = sinc(x) * sinc(x / a) end
 		end
 
 		return torch.ger(v, v)
@@ -382,7 +399,11 @@ end
 Returns a `SpatialFullConvolution` layer initialized such that each group of $k$ consecutive output
 feature maps upsamples the same input feature map.
 
+TODO: Compatibility with PIL/ImageMagick.
+TODO: Support for non-integer upsampling factors.
 TODO: Support for non-square inputs.
+TODO: Reimplement using two 1D convolutions, since all of the kernels are separable. This is
+      drastically faster, and makes more sense from the learning perspective.
 --]]
 function nninit.make_spatial_upsampling_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
@@ -398,11 +419,12 @@ function nninit.make_spatial_upsampling_conv(args)
 	assert(init:size(1) == init:size(2))
 
 	local inner_width = init:size(1)
+	local kw          = kw or inner_width
 	local extra_width = kw - inner_width
-	local extent      = (inner_width + 1) / (2 * scale)
+	local support     = (inner_width + 1) / (2 * scale)
 
 	assert(kw >= inner_width)
-	assert(extent == math.floor(extent))
+	assert(support == math.floor(support))
 
 	--[[
 	Some explanations for the variables:
@@ -424,10 +446,10 @@ function nninit.make_spatial_upsampling_conv(args)
 	local pw, aw, m
 
 	if scale % 2 == 0 then
-		pw = (inner_width + 1) / 2 + scale / 2 + scale * (extent - 1)
+		pw = (inner_width + 1) / 2 + scale / 2 + scale * (support - 1)
 		aw = 1
 	else
-		pw = (inner_width + 1) / 2 + (scale - 1) / 2 + scale * (extent - 1)
+		pw = (inner_width + 1) / 2 + (scale - 1) / 2 + scale * (support - 1)
 		aw = 0
 	end
 
@@ -447,17 +469,73 @@ function nninit.make_spatial_upsampling_conv(args)
 
 	if extra_width == 0 then
 		return nn.Sequential()
-			:add(nn.SpatialReflectionPadding(extent, extent, extent, extent))
+			:add(nn.SpatialReplicationPadding(support, support, support, support))
 			:add(m)
 	else
 		-- XXX: cropping using `SpatialZeroPadding` is very slow.
 		return nn.Sequential()
-			:add(nn.SpatialReflectionPadding(extent, extent, extent, extent))
+			:add(nn.SpatialReplicationPadding(support, support, support, support))
 			:add(m)
 			:add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
 	end
 end
 
+--[[
+TODO: Compatibility with PIL/ImageMagick.
+TODO: Support for non-integer upsampling factors.
+TODO: Support for non-square inputs.
+--]]
+function nninit.make_spatial_downsampling_conv(args)
+	local kw, fm_in, k = validate_common_conv_args(args)
+	local fm_out       = k * fm_in
+	local scale        = args.scale
+
+	assert(scale >= 1)
+
+	local kernel = args.kernel or nninit.bilinear
+	local init   = kernel(scale, inner_width)
+
+	assert(init:nDimension() == 2)
+	assert(init:size(1) == init:size(2))
+
+	local inner_width = init:size(1)
+
+	assert(inner_width >= scale)
+	assert((inner_width - scale) % 2 == 0)
+
+	local kw          = kw or inner_width
+	local extra_width = kw - inner_width
+	local pw          = (inner_width - scale) / 2
+
+	assert(kw >= inner_width)
+
+	m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale)
+
+	local w, b = m.weight, m.bias
+	w:zero()
+	b:zero()
+
+	for i = 1, fm_in do
+		for j = 1, k do
+			local i_out = k * (i - 1) + j
+			w[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width},
+				{extra_width + 1, extra_width + inner_width}}]:copy(init)
+		end
+	end
+
+	if pw > 0 then
+		return nn.Sequential()
+			:add(nn.SpatialReplicationPadding(pw, pw, pw, pw))
+			:add(m)
+	end
+
+	return m
+end
+
+--[[
+TODO: make this a special case of upsampling or downsampling by a factor of 1 using the Gaussian
+kernel.
+--]]
 function nninit.make_spatial_blur_conv(args)
 	local kw, fm_in, k = validate_common_conv_args(args)
 	assert(k == 1)
