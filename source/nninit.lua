@@ -254,100 +254,16 @@ function nninit.make_identity_spatial_conv(args)
 end
 
 --[[
-Returns a strided `SpatialConvolution` layer initialized such that each group of $k$ consecutive
-output feature maps downsamples the same input feature map.
-
-Note: this doesn't match the result of upsampling using `image.scale`, but (1) I don't have time to
-examine the source to see what it's doing, and (2) the output from this function seems to "move" the
-original image less and retains more sharpness in the examples that I tested.
-
-TODO: Support for non-square inputs.
-TODO: Support for perforated convolutions?
+XXX: hack used to work around the fact that `torch.class('nninit.XXX')` is giving a bullshit error
+that I don't want to debug right now.
 --]]
+local bilinear_ = torch.class('bilinear')
+local lanczos_  = torch.class('lanczos')
 
---[[
-XXX: remove this later.
+nninit.bilinear = bilinear
+nninit.lanczos  = lanczos
 
-function nninit.make_spatial_average_downsampling_conv(args)
-	local kw, fm_in, k = validate_common_conv_args(args)
-	local fm_out       = k * fm_in
-	local scale        = args.scale
-	local iw           = args.input_width
-
-	assert(scale >= 1)
-	assert(kw >= scale)
-	assert(iw >= kw)
-
-	local extend_width = 0
-	if iw % scale ~= 0 then extend_width = scale - iw % scale end
-	local extra_width = kw - scale
-
-	local p_lt, p_rb
-
-	if extend_width % 2 == 0 then
-		p_lt, p_rb = extend_width / 2, extend_width / 2
-	else
-		p_lt, p_rb = (extend_width - 1) / 2, (extend_width + 1) / 2
-	end
-
-	if extra_width % 2 == 0 then
-		local pw = extra_width / 2
-		local m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
-		local w, b = m.weight, m.bias
-
-		w:zero()
-		b:zero()
-
-		for i = 1, fm_in do
-			for j = 1, k do
-				local i_out = k * (i - 1) + j
-				w[{{i_out}, {i}, {pw + 1, pw + scale},
-					{pw + 1, pw + scale}}]:fill(1 / scale^2)
-			end
-		end
-
-		if extend_width == 0 then
-			return m
-		else
-			return nn.Sequential():
-				add(nn.SpatialReflectionPadding(p_lt, p_rb, p_lt, p_rb)):
-				add(m)
-		end
-	else
-		local pw = 0
-		local m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw)
-		local w, b = m.weight, m.bias
-
-		w:zero()
-		b:zero()
-
-		local zp_lt = (extra_width - 1) / 2
-		local zp_rb = (extra_width + 1) / 2
-
-		for i = 1, fm_in do
-			for j = 1, k do
-				local i_out = k * (i - 1) + j
-				w[{{i_out}, {i}, {zp_lt + 1, zp_lt + scale},
-					{zp_lt + 1, zp_lt + scale}}]:fill(1 / scale^2)
-			end
-		end
-
-		if extend_width == 0 then
-			return nn.Sequential():
-				add(nn.SpatialZeroPadding(zp_lt, zp_rb, zp_lt, zp_rb)):
-				add(m)
-		else
-			return nn.Sequential():
-				add(nn.SpatialReflectionPadding(p_lt, p_rb, p_lt, p_rb)):
-				add(nn.SpatialZeroPadding(zp_lt, zp_rb, zp_lt, zp_rb)):
-				add(m)
-		end
-	end
-end
---]]
-
-function nninit.bilinear(scale)
-	--[[
+function bilinear_:make_upsampling_kernel(scale)
 	assert(scale >= 1)
 
 	local kw     = 2 * scale - 1
@@ -356,43 +272,69 @@ function nninit.bilinear(scale)
 
 	for i = 1, kw do v[i] = 1 - math.abs(i - origin) / scale end
 	return torch.ger(v, v)
-	--]]
+end
 
+function bilinear_:make_downsampling_kernel(scale)
 	assert(scale >= 1)
 
 	local kw     = scale
 	local origin = (kw + 1) / 2
 	local v      = torch.Tensor(kw)
 
-	for i = 1, kw do v[i] = 1 - math.abs(i - origin) end
-	v:div(v:sum())
+	for i = 1, kw do
+		local d = math.ceil(math.abs(i - origin))
+		local x = 1 / (2 * scale) + (d - 1) / scale
+		v[i] = 1 - x
+	end
 
-	print(v)
+	v:div(v:sum())
+	return torch.ger(v, v)
+end
+
+function lanczos_:__init(a)
+	assert(a >= 2 and math.floor(a) == a)
+	self.a = a
+end
+
+function lanczos_:make_upsampling_kernel(scale)
+	assert(scale >= 1)
+
+	local kw     = 2 * self.a * scale - 1
+	local origin = (kw + 1) / 2
+	local sinc   = function(x) return math.sin(math.pi * x) / (math.pi * x) end
+	local v      = torch.Tensor(kw)
+
+	for i = 1, kw do
+		local x = (i - origin) / scale
+
+		if math.abs(x) >= self.a then v[i] = 0
+		elseif x == 0            then v[i] = 1
+		else                          v[i] = sinc(x) * sinc(x / self.a) end
+	end
 
 	return torch.ger(v, v)
 end
 
-function nninit.lanczos(a)
-	assert(a == 2 or a == 3)
+function lanczos_:make_downsampling_kernel(scale)
+	assert(scale >= 1)
 
-	return function(scale)
-		assert(scale >= 1)
+	local kw     = 2 * self.a * scale
+	local origin = (kw + 1) / 2
+	local sinc   = function(x) return math.sin(math.pi * x) / (math.pi * x) end
+	local v      = torch.Tensor(kw)
 
-		local kw     = 2 * a * scale - 1
-		local origin = math.floor((kw + 1) / 2)
-		local sinc   = function(x) return math.sin(math.pi * x) / (math.pi * x) end
-		local v      = torch.Tensor(kw)
+	for i = 1, kw do
+		local d = math.ceil(math.abs(i - origin))
+		local x = 1 / (2 * scale) + (d - 1) / scale
+		if i <= origin then x = x * -1 end
 
-		for i = 1, kw do
-			local x = (i - origin) / scale
-
-			if math.abs(x) >= a then v[i] = 0
-			elseif x == 0       then v[i] = 1
-			else                     v[i] = sinc(x) * sinc(x / a) end
-		end
-
-		return torch.ger(v, v)
+		if math.abs(x) >= self.a then v[i] = 0
+		elseif x == 0            then v[i] = 1
+		else                          v[i] = sinc(x) * sinc(x / self.a) end
 	end
+
+	v:div(v:sum())
+	return torch.ger(v, v)
 end
 
 --[[
@@ -412,8 +354,8 @@ function nninit.make_spatial_upsampling_conv(args)
 
 	assert(scale >= 1)
 
-	local kernel = args.kernel or nninit.bilinear
-	local init   = kernel(scale, inner_width)
+	local kernel = args.kernel or nninit.bilinear()
+	local init   = kernel:make_upsampling_kernel(scale)
 
 	assert(init:nDimension() == 2)
 	assert(init:size(1) == init:size(2))
@@ -492,8 +434,8 @@ function nninit.make_spatial_downsampling_conv(args)
 
 	assert(scale >= 1)
 
-	local kernel = args.kernel or nninit.bilinear
-	local init   = kernel(scale, inner_width)
+	local kernel = args.kernel or nninit.bilinear()
+	local init   = kernel:make_downsampling_kernel(scale)
 
 	assert(init:nDimension() == 2)
 	assert(init:size(1) == init:size(2))

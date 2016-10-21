@@ -8,11 +8,11 @@ image.save('output/original.png', img)
 
 local scale = 4
 
-local m = nninit.make_spatial_downsampling_conv({n_maps_in = 3, expansion_factor = 1,
-	scale = scale, input_width = img_width})
+local m = nninit.make_spatial_downsampling_conv({kernel = nninit.lanczos(3), n_maps_in = 3,
+	expansion_factor = 1, scale = scale, input_width = img_width})
 
 local new_width = math.ceil(img_width / scale)
-local y = image.scale(img, new_width, new_width)
+local y = image.scale(img, new_width, new_width, 'bilinear')
 image.save(F'output/scaled_output_{scale}.png', y)
 
 local y_hat = m:forward(img)
