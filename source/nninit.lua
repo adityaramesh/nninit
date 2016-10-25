@@ -409,14 +409,16 @@ function nninit.make_spatial_upsampling_conv(args)
 	for i = 1, fm_in do
 		for j = 1, k do
 			local i_out = k * (i - 1) + j
-			w_x[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width}}]:copy(init)
+			w_x[{{i_out}, {i}, {1}, {extra_width + 1, extra_width + inner_width}}]:
+				copy(init)
 		end
 	end
 
 	for i = 1, fm_out do
 		for j = 1, k do
 			local i_out = k * (i - 1) + j
-			w_x[{{i_out}, {i}, {1}, {extra_width + 1, extra_width + inner_width}}]:copy(init)
+			w_y[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width}}]:
+				copy(init)
 		end
 	end
 
