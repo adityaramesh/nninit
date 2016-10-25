@@ -271,7 +271,7 @@ function bilinear_:make_upsampling_kernel(scale)
 	local v      = torch.Tensor(kw)
 
 	for i = 1, kw do v[i] = 1 - math.abs(i - origin) / scale end
-	return torch.ger(v, v)
+	return v
 end
 
 function bilinear_:make_downsampling_kernel(scale)
@@ -288,7 +288,7 @@ function bilinear_:make_downsampling_kernel(scale)
 	end
 
 	v:div(v:sum())
-	return torch.ger(v, v)
+	return v
 end
 
 function lanczos_:__init(a)
@@ -312,7 +312,7 @@ function lanczos_:make_upsampling_kernel(scale)
 		else                          v[i] = sinc(x) * sinc(x / self.a) end
 	end
 
-	return torch.ger(v, v)
+	return v
 end
 
 function lanczos_:make_downsampling_kernel(scale)
@@ -334,7 +334,7 @@ function lanczos_:make_downsampling_kernel(scale)
 	end
 
 	v:div(v:sum())
-	return torch.ger(v, v)
+	return v
 end
 
 --[[
@@ -356,9 +356,6 @@ function nninit.make_spatial_upsampling_conv(args)
 
 	local kernel = args.kernel or nninit.bilinear()
 	local init   = kernel:make_upsampling_kernel(scale)
-
-	assert(init:nDimension() == 2)
-	assert(init:size(1) == init:size(2))
 
 	local inner_width = init:size(1)
 	local kw          = kw or inner_width
@@ -385,7 +382,7 @@ function nninit.make_spatial_upsampling_conv(args)
 	    `SpatialFullConvolution`. This is the represented by the second term in the expression
 	    for `pw` below.
 	--]]
-	local pw, aw, m
+	local pw, aw
 
 	if scale % 2 == 0 then
 		pw = (inner_width + 1) / 2 + scale / 2 + scale * (support - 1)
@@ -395,29 +392,45 @@ function nninit.make_spatial_upsampling_conv(args)
 		aw = 0
 	end
 
-	m = SpatialFullConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw, aw, aw)
+	local m = SpatialFullConvolution(fm_in, fm_out, kw, kw, scale, scale, pw, pw, aw, aw)
 
-	local w, b = m.weight, m.bias
-	w:zero()
-	b:zero()
+	local conv_x = SpatialFullConvolution(fm_in,  fm_out,   kw, 1,   scale, 1,   pw, 0,   aw, 0)
+	local conv_y = SpatialFullConvolution(fm_out, fm_out,   1, kw,   1, scale,   0, pw,   0, aw)
+
+	local w_x, b_x = conv_x.weight, conv_x.bias
+	local w_y, b_y = conv_y.weight, conv_y.bias
+
+	w_x:zero()
+	b_x:zero()
+
+	w_y:zero()
+	b_y:zero()
 
 	for i = 1, fm_in do
 		for j = 1, k do
 			local i_out = k * (i - 1) + j
-			w[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width},
-				{extra_width + 1, extra_width + inner_width}}]:copy(init)
+			w_x[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width}}]:copy(init)
+		end
+	end
+
+	for i = 1, fm_out do
+		for j = 1, k do
+			local i_out = k * (i - 1) + j
+			w_x[{{i_out}, {i}, {1}, {extra_width + 1, extra_width + inner_width}}]:copy(init)
 		end
 	end
 
 	if extra_width == 0 then
 		return nn.Sequential()
 			:add(nn.SpatialReplicationPadding(support, support, support, support))
-			:add(m)
+			:add(conv_x)
+			:add(conv_y)
 	else
 		-- XXX: cropping using `SpatialZeroPadding` is very slow.
 		return nn.Sequential()
 			:add(nn.SpatialReplicationPadding(support, support, support, support))
-			:add(m)
+			:add(conv_x)
+			:add(conv_y)
 			:add(nn.SpatialZeroPadding(-extra_width, 0, -extra_width, 0))
 	end
 end
