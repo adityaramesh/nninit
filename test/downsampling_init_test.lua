@@ -18,12 +18,18 @@ image.save(F'output/scaled_output_{scale}.png', y)
 local y_hat = m:forward(img)
 image.save(F'output/conv_output_{scale}.png', y_hat)
 
-local rescaled_y = image.scale(y, 512, 512)
+-- local y2 = image.load('foo/im.png')
+
+local rescaled_y     = image.scale(y, 512, 512)
 local rescaled_y_hat = image.scale(y_hat, 512, 512)
+-- local rescaled_y2    = image.scale(y2, 512, 512)
+
 image.save(F'output/rescaled_scaled_output_{scale}.png', rescaled_y)
 image.save(F'output/rescaled_conv_output_{scale}.png', rescaled_y_hat)
+-- image.save(F'output/rescaled_im_output_{scale}.png', rescaled_y2)
 
 print(torch.norm(torch.add(y, -1 , y_hat)))
+-- print(torch.norm(torch.add(y, -1 , y2)))
 
 --[[
 for _, scale in pairs({1, 2, 3, 10, 11}) do

@@ -452,9 +452,6 @@ function nninit.make_spatial_downsampling_conv(args)
 	local kernel = args.kernel or nninit.bilinear()
 	local init   = kernel:make_downsampling_kernel(scale)
 
-	assert(init:nDimension() == 2)
-	assert(init:size(1) == init:size(2))
-
 	local inner_width = init:size(1)
 
 	assert(inner_width >= scale)
@@ -466,24 +463,39 @@ function nninit.make_spatial_downsampling_conv(args)
 
 	assert(kw >= inner_width)
 
-	m = SpatialConvolution(fm_in, fm_out, kw, kw, scale, scale)
+	local conv_x = SpatialConvolution(fm_in, fm_out, kw, 1, scale, 1)
+	local conv_y = SpatialConvolution(fm_out, fm_out, 1, kw, 1, scale)
 
-	local w, b = m.weight, m.bias
-	w:zero()
-	b:zero()
+	local w_x, b_x = conv_x.weight, conv_x.bias
+	local w_y, b_y = conv_y.weight, conv_y.bias
+
+	w_x:zero()
+	b_x:zero()
+
+	w_y:zero()
+	b_y:zero()
 
 	for i = 1, fm_in do
 		for j = 1, k do
 			local i_out = k * (i - 1) + j
-			w[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width},
-				{extra_width + 1, extra_width + inner_width}}]:copy(init)
+			w_x[{{i_out}, {i}, {1}, {extra_width + 1, extra_width + inner_width}}]:
+				copy(init)
+		end
+	end
+
+	for i = 1, fm_out do
+		for j = 1, k do
+			local i_out = k * (i - 1) + j
+			w_y[{{i_out}, {i}, {extra_width + 1, extra_width + inner_width}}]:
+				copy(init)
 		end
 	end
 
 	if pw > 0 then
 		return nn.Sequential()
 			:add(nn.SpatialReplicationPadding(pw, pw, pw, pw))
-			:add(m)
+			:add(conv_x)
+			:add(conv_y)
 	end
 
 	return m
