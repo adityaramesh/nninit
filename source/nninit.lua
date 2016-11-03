@@ -506,7 +506,6 @@ function nninit.make_spatial_blur_conv(args)
 	local std = args.std or 0.25
 	assert(std > 0)
 
-	local iw = args.input_width
 	local kw = kw or math.max(3, math.ceil(6 * std))
 
 	local pad_lt, pad_rb
