@@ -189,7 +189,7 @@ local function validate_common_conv_args(args)
 
 	assert(kw == nil or kw >= 1)
 	assert(fm_in >= 1)
-	assert(k >= 1, "Only positive, integral expansion factors are supported.")
+	assert(k == nil or k >= 1, "Only positive, integral expansion factors are supported.")
 	return kw, fm_in, k
 end
 
@@ -501,31 +501,37 @@ function nninit.make_spatial_downsampling_conv(args)
 	return m
 end
 
---[[
-TODO: make this a special case of upsampling or downsampling by a factor of 1 using the Gaussian
-kernel.
---]]
 function nninit.make_spatial_blur_conv(args)
-	local kw, fm_in, k = validate_common_conv_args(args)
-	assert(k == 1)
-
-	local iw = args.input_width
+	local kw, fm_in = validate_common_conv_args(args)
 	local std = args.std or 0.25
 	assert(std > 0)
 
+	local iw = args.input_width
+	local kw = kw or math.max(3, math.ceil(6 * std))
+
 	local pad_lt, pad_rb
-	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, kw / 2
+	if kw % 2 == 0 then pad_lt, pad_rb = (kw - 2) / 2, (kw - 2) / 2
 	else pad_lt, pad_rb = (kw - 1) / 2, (kw - 1) / 2 end
 
-	local kernel = image.gaussian({size = kw, normalize = true, sigma = std}):view(1, 1, kw, kw)
-	local conv = SpatialConvolution(1, 1, kw, kw)
-	conv.bias, conv.gradBias = nil, nil
-	conv.weight:copy(kernel)
+	local v = image.gaussian1D({size = kw, normalize = true, sigma = std})
+
+	local conv_x = SpatialConvolution(1, 1, kw, 1)
+	local conv_y = SpatialConvolution(1, 1, 1, kw)
+
+	local w_x, b_x = conv_x.weight, conv_x.bias
+	local w_y, b_y = conv_y.weight, conv_y.bias
+
+	w_x:view(kw):copy(v)
+	w_y:view(kw):copy(v)
+
+	b_x:zero()
+	b_y:zero()
 
 	return nn.Sequential()
 		:add(nn.View(-1, 1, iw, iw))
 		:add(nn.SpatialReplicationPadding(pad_lt, pad_rb, pad_lt, pad_rb))
-		:add(conv)
+		:add(conv_x)
+		:add(conv_y)
 		:add(nn.View(-1, fm_in, iw, iw))
 end
 
